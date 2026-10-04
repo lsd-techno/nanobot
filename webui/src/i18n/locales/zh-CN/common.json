@@ -441,6 +441,34 @@
           "label": "工具提示长度上限（字符）",
           "help": "工具执行时显示的简短提示最多包含多少个字符。"
         },
+        "tools_quota_gate_enabled": {
+          "label": "动态配额门控",
+          "help": "在新会话或继续会话时获取所选模型的实时配额，并按剩余量执行相应策略。"
+        },
+        "tools_quota_gate_suspend_on_exhaustion": {
+          "label": "配额耗尽时暂停会话",
+          "help": "当模型的配额耗尽时暂停会话，并在下一个重置窗口后自动恢复。"
+        },
+        "tools_quota_gate_shrink_iterations": {
+          "label": "按剩余配额调整迭代次数",
+          "help": "缩减每轮工具迭代上限，使其不超过剩余的请求配额。"
+        },
+        "tools_quota_gate_min_request_buffer": {
+          "label": "保留请求数",
+          "help": "暂停会话前始终保留的请求数。"
+        },
+        "tools_quota_gate_min_token_buffer": {
+          "label": "保留令牌/调用数",
+          "help": "暂停会话前始终保留的令牌或计费调用数。"
+        },
+        "tools_quota_gate_snapshot_ttl_seconds": {
+          "label": "配额缓存有效期（秒）",
+          "help": "获取到的配额快照在被重新拉取前保持有效的时间。"
+        },
+        "tools_quota_gate_fetch_timeout_seconds": {
+          "label": "配额获取超时（秒）",
+          "help": "等待配额接口的最长时间，超时后不再阻塞继续执行。"
+        },
         "tools_max_session_messages_per_minute": {
           "label": "每分钟工具消息上限",
           "help": "限制工具每分钟向同一会话发送的消息数。"
@@ -586,6 +614,10 @@
         "execution": {
           "title": "智能体运行限制",
           "help": "调整工具执行上限和重试行为。"
+        },
+        "quota": {
+          "title": "模型配额",
+          "help": "获取所选模型的实时配额，按剩余量调整迭代次数，并在配额耗尽时暂停会话直到下一个重置窗口。"
         },
         "sessions": {
           "title": "会话",

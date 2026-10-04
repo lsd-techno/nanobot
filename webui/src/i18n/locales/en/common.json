@@ -441,6 +441,34 @@
           "label": "Tool activity summary length (characters)",
           "help": "Maximum number of characters shown in a tool activity summary."
         },
+        "tools_quota_gate_enabled": {
+          "label": "Dynamic quota gate",
+          "help": "Fetch live limits for the chosen model on session start/continue and act on what is left."
+        },
+        "tools_quota_gate_suspend_on_exhaustion": {
+          "label": "Suspend sessions when quota runs out",
+          "help": "Pause a session when its model quota is exhausted and resume it after the next reset window."
+        },
+        "tools_quota_gate_shrink_iterations": {
+          "label": "Fit iterations to remaining quota",
+          "help": "Reduce the per-turn tool iteration budget so it fits the remaining request quota."
+        },
+        "tools_quota_gate_min_request_buffer": {
+          "label": "Reserved requests buffer",
+          "help": "Requests always kept free before the session is suspended."
+        },
+        "tools_quota_gate_min_token_buffer": {
+          "label": "Reserved tokens/calls buffer",
+          "help": "Tokens or billed calls always kept free before the session is suspended."
+        },
+        "tools_quota_gate_snapshot_ttl_seconds": {
+          "label": "Quota cache lifetime (seconds)",
+          "help": "How long a fetched quota snapshot stays fresh before a turn re-fetches it."
+        },
+        "tools_quota_gate_fetch_timeout_seconds": {
+          "label": "Quota fetch timeout (seconds)",
+          "help": "Maximum time to wait for the quota endpoint before continuing without it."
+        },
         "tools_max_session_messages_per_minute": {
           "label": "Session message tool limit (per minute)",
           "help": "Maximum number of messages tools can send to the same session each minute."
@@ -586,6 +614,10 @@
         "execution": {
           "title": "Agent limits",
           "help": "Tune tool execution and retry behavior."
+        },
+        "quota": {
+          "title": "Model quota",
+          "help": "Fetch live limits for the chosen model, fit iterations to what is left, and suspend sessions until the next reset window."
         },
         "sessions": {
           "title": "Sessions",

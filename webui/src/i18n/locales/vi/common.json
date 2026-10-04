@@ -449,6 +449,7 @@
         "memory": {"title": "Bộ nhớ", "help": "Bật hoặc tắt tính năng tự động sắp xếp bộ nhớ."},
         "heartbeat": {"title": "Lịch kiểm tra định kỳ", "help": "Cấu hình kiểm tra tác vụ định kỳ tích hợp."},
         "execution": {"title": "Giới hạn tác nhân", "help": "Thực thi công cụ và cách thử lại."},
+        "quota": {"title": "Hạn mức mô hình", "help": "Lấy giới hạn mô hình, điều chỉnh vòng lặp và tạm dừng phiên đến cửa sổ tiếp theo."},
         "sessions": {"title": "Cuộc trò chuyện", "help": "Chia sẻ cuộc trò chuyện giữa các nền tảng."},
         "tools": {"title": "Công cụ tích hợp", "help": "Chọn nhóm công cụ được phép sử dụng."},
         "shell": {"title": "Shell và sandbox", "help": "Thời gian chờ, môi trường, đường dẫn gắn và bộ lọc lệnh."},

@@ -449,6 +449,7 @@
         "memory": {"title": "Memori", "help": "Aktifkan atau nonaktifkan penataan memori otomatis."},
         "heartbeat": {"title": "Jadwal pemeriksaan berkala", "help": "Atur pemeriksaan tugas berkala bawaan."},
         "execution": {"title": "Batas agen", "help": "Eksekusi alat dan perilaku percobaan ulang."},
+        "quota": {"title": "Kuota model", "help": "Ambil batas model, sesuaikan iterasi, dan tangguhkan sesi hingga jendela berikutnya."},
         "sessions": {"title": "Percakapan", "help": "Bagikan percakapan antarplatform."},
         "tools": {"title": "Alat bawaan", "help": "Pilih kategori alat yang diizinkan."},
         "shell": {"title": "Shell dan sandbox", "help": "Batas waktu, lingkungan, pemasangan jalur, dan filter perintah."},

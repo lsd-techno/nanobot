@@ -449,6 +449,7 @@
         "memory": {"title": "Memória", "help": "Ative ou desative a consolidação automática de memória."},
         "heartbeat": {"title": "Verificações periódicas", "help": "Configure a verificação periódica integrada de tarefas."},
         "execution": {"title": "Limites do agente", "help": "Execução de ferramentas e novas tentativas."},
+        "quota": {"title": "Cota do modelo", "help": "Busca os limites do modelo, ajusta iterações e suspende sessões até a próxima janela."},
         "sessions": {"title": "Conversas", "help": "Compartilhe conversas entre plataformas."},
         "tools": {"title": "Ferramentas integradas", "help": "Escolha as categorias de ferramentas permitidas."},
         "shell": {"title": "Shell e sandbox", "help": "Tempos limite, ambiente, montagens e filtros de comandos."},

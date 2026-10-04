@@ -22,6 +22,7 @@ from loguru import logger
 
 from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
+from nanobot.agent import quota_gate
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
@@ -350,6 +351,7 @@ class AgentLoop:
         self.tools_config = _tc
         self.web_config = _tc.web
         self.exec_config = _tc.exec
+        self.quota_gate_config = _tc.quota_gate
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
         if (
             image_generation_provider_config is not None
@@ -1809,6 +1811,18 @@ class AgentLoop:
             if await self._run_turn_stage(ctx, "command", self._dispatch_command):
                 self._log_turn_completion(ctx, outcome="command")
                 return ctx.outbound
+            await self._run_turn_stage(ctx, "quota_preflight", self._quota_preflight)
+            if ctx.stop_reason == "quota_suspended":
+                await self._run_turn_stage(ctx, "save", self._persist_turn)
+                await self._run_turn_stage(ctx, "respond", self._prepare_outbound)
+                self._log_turn_completion(ctx, outcome="quota_suspended")
+                return ctx.outbound
+            await self._run_turn_stage(ctx, "quota_resume", self._quota_resume_turn)
+            if ctx.stop_reason == "quota_suspended":
+                await self._run_turn_stage(ctx, "save", self._persist_turn)
+                await self._run_turn_stage(ctx, "respond", self._prepare_outbound)
+                self._log_turn_completion(ctx, outcome="quota_suspended")
+                return ctx.outbound
             await self._run_turn_stage(ctx, "build", self._build_turn)
             await self._run_turn_stage(ctx, "run", self._run_turn)
             await self._run_turn_stage(ctx, "save", self._persist_turn)
@@ -2043,6 +2057,148 @@ class AgentLoop:
             return True
         return False
 
+    @staticmethod
+    def _quota_provider_name(runtime: LLMRuntime) -> str:
+        """Return the runtime provider name as a plain string (fail-open)."""
+        try:
+            name = getattr(runtime.provider, "provider_name", "")
+            return str(name) if isinstance(name, str) and name else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _quota_preflight(self, ctx: TurnContext) -> None:
+        """Fetch current quota for the chosen model and bound the turn.
+
+        Runs at BUILD time (new or continued session) when the quota gate is
+        enabled. Results are stored in session metadata and used to:
+        - shrink the per-turn iteration budget to what the remaining request
+          allowance can actually support (never below 1);
+        - short-circuit a turn that has no room left at all (suspend instead
+          of spending the last requests on an error).
+
+        Fail-open: any fetch error or unsupported provider leaves the turn
+        unchanged.
+        """
+        if not self.quota_gate_config.enabled:
+            return
+        if ctx.ephemeral or ctx.session is None:
+            return
+        if ctx.kind is not TurnKind.USER:
+            return
+        runtime = ctx.runtime
+        if runtime is None:
+            return
+        provider_name = self._quota_provider_name(runtime)
+        model = runtime.model
+        api_key: str | None = None
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            preset = None
+            if runtime.model_preset:
+                preset = config.model_presets.get(runtime.model_preset)
+            api_key = config.get_api_key(model, preset=preset)
+        except Exception:  # noqa: BLE001 - fail open
+            api_key = None
+        snapshot = quota_gate.fetch_for_model(
+            provider_name=provider_name,
+            model=model,
+            api_key=api_key,
+            timeout=self.quota_gate_config.fetch_timeout_seconds,
+        )
+        if snapshot is None:
+            return
+        quota_gate.write_snapshot(ctx.session.metadata, snapshot)
+        self.sessions.save(ctx.session)
+        if self.quota_gate_config.shrink_iterations:
+            self.max_iterations = quota_gate.fit_iterations(
+                self.max_iterations,
+                snapshot,
+                min_request_buffer=self.quota_gate_config.min_request_buffer,
+            )
+            self._sync_subagent_runtime_limits()
+        blocking = snapshot.blocking(
+            min_request_buffer=self.quota_gate_config.min_request_buffer,
+            min_token_buffer=self.quota_gate_config.min_token_buffer,
+        )
+        if blocking is not None and self.quota_gate_config.suspend_on_exhaustion:
+            resume_at = snapshot.next_resume_ts(
+                min_request_buffer=self.quota_gate_config.min_request_buffer,
+                min_token_buffer=self.quota_gate_config.min_token_buffer,
+            )
+            quota_gate.write_suspension(
+                ctx.session.metadata,
+                reason=blocking.label,
+                resume_at=resume_at,
+                provider=provider_name,
+                model=model,
+            )
+            self.sessions.save(ctx.session)
+            ctx.suppress_response = True
+            ctx.final_content = quota_gate.suspension_notice(snapshot, blocking.label)
+            ctx.stop_reason = "quota_suspended"
+
+    async def _quota_resume_turn(self, ctx: TurnContext) -> None:
+        """Re-check quota on a resume/cron turn and clear the suspension.
+
+        The one-shot resume cron delivers a normal agent turn. If the session
+        is still marked suspended but the quota has room again, clear the
+        suspension so the turn proceeds normally. If quota is still exhausted,
+        re-suspend with the newly reported reset time.
+        """
+        if not self.quota_gate_config.enabled or ctx.ephemeral or ctx.session is None:
+            return
+        suspension = quota_gate.read_suspension(ctx.session.metadata)
+        if suspension is None:
+            return
+        snapshot = quota_gate.read_snapshot(ctx.session.metadata)
+        runtime = ctx.runtime
+        if runtime is None:
+            return
+        provider_name = self._quota_provider_name(runtime)
+        model = runtime.model
+        if snapshot is None or (time.time() - snapshot.fetched_at) > self.quota_gate_config.snapshot_ttl_seconds:
+            try:
+                from nanobot.config.loader import load_config
+                config = load_config()
+                api_key = config.get_api_key(model)
+            except Exception:  # noqa: BLE001 - fail open
+                api_key = None
+            snapshot = quota_gate.fetch_for_model(
+                provider_name=provider_name,
+                model=model,
+                api_key=api_key,
+                timeout=self.quota_gate_config.fetch_timeout_seconds,
+            )
+            if snapshot is not None:
+                quota_gate.write_snapshot(ctx.session.metadata, snapshot)
+        if snapshot is not None and not snapshot.exhausted(
+            min_request_buffer=self.quota_gate_config.min_request_buffer,
+            min_token_buffer=self.quota_gate_config.min_token_buffer,
+        ):
+            quota_gate.clear_suspension(ctx.session.metadata)
+            self.sessions.save(ctx.session)
+            return
+        if snapshot is not None and snapshot.exhausted(
+            min_request_buffer=self.quota_gate_config.min_request_buffer,
+            min_token_buffer=self.quota_gate_config.min_token_buffer,
+        ):
+            resume_at = snapshot.next_resume_ts(
+                min_request_buffer=self.quota_gate_config.min_request_buffer,
+                min_token_buffer=self.quota_gate_config.min_token_buffer,
+            )
+            quota_gate.write_suspension(
+                ctx.session.metadata,
+                reason=ctx.stop_reason or "quota",
+                resume_at=resume_at,
+                provider=provider_name,
+                model=model,
+            )
+            self.sessions.save(ctx.session)
+            ctx.suppress_response = True
+            ctx.final_content = quota_gate.suspension_notice(snapshot, "quota")
+            ctx.stop_reason = "quota_suspended"
+
     async def _build_turn(self, ctx: TurnContext) -> None:
         session = ctx.require_session()
         runtime = ctx.runtime
@@ -2191,6 +2347,89 @@ class AgentLoop:
         ctx.delivery.record_usage(result.round_usages)
         if ctx.kind is TurnKind.USER:
             await turn_continuation.maybe_continue_turn(ctx)
+        await self._quota_suspend_after_run(ctx)
+
+    async def _quota_suspend_after_run(self, ctx: TurnContext) -> None:
+        """Suspend the session when the provider hit a quota/billing boundary.
+
+        Runs after every turn. When the runner stopped with a billing or
+        rate-limit error (or an arrearage response), record the suspension in
+        session metadata, deliver a user-visible notice, and schedule a
+        one-shot cron job at the server's next reset timestamp so the session
+        resumes automatically once the window opens again.
+
+        Fail-open: if quota is not configured for this provider, or the cron
+        service is unavailable, the notice is still delivered but no resume is
+        scheduled.
+        """
+        if not self.quota_gate_config.enabled or not self.quota_gate_config.suspend_on_exhaustion:
+            return
+        if ctx.ephemeral or ctx.session is None:
+            return
+        if ctx.stop_reason not in {"error", "max_iterations"}:
+            return
+        failure_kind = ctx.failure_error_kind
+        if failure_kind not in {"billing", "rate_limit"} and ctx.stop_reason != "error":
+            return
+        if ctx.kind is not TurnKind.USER:
+            # Only user-driven turns carry a resumable session boundary worth
+            # suspending; system/subagent turns must never be gate-managed.
+            return
+
+        runtime = ctx.runtime
+        if runtime is None:
+            return
+        provider_name = self._quota_provider_name(runtime)
+        model = runtime.model
+        snapshot = quota_gate.read_snapshot(ctx.session.metadata)
+        # Only gate a suspension when we actually know this provider's quota.
+        # Without a snapshot there is nothing to schedule against and the
+        # original transient-error behavior must be preserved.
+        if snapshot is None:
+            return
+        resume_at = snapshot.next_resume_ts(
+            min_request_buffer=self.quota_gate_config.min_request_buffer,
+            min_token_buffer=self.quota_gate_config.min_token_buffer,
+        ) if snapshot is not None else None
+        if resume_at is None and snapshot is not None:
+            # Fall back to the provider error's own reset if the snapshot has none.
+            resume_at = snapshot.requests.next_reset or snapshot.tokens.next_reset or None
+
+        reason = failure_kind or "quota"
+        job_id = None
+        if self.cron_service is not None and resume_at:
+            try:
+                origin_metadata: dict[str, Any] = {}
+                for key, value in (ctx.delivery.route.metadata or {}).items():
+                    try:
+                        json.dumps(value, ensure_ascii=False, allow_nan=False)
+                        origin_metadata[key] = value
+                    except (TypeError, ValueError):
+                        continue
+                job = self.cron_service.add_job(
+                    name=f"quota-resume-{ctx.session_key[:24]}",
+                    schedule=quota_gate.build_resume_schedule(resume_at),
+                    message=quota_gate.resume_message(provider_name, model, reason),
+                    session_key=ctx.session_key,
+                    origin_channel=ctx.delivery.route.channel,
+                    origin_chat_id=ctx.delivery.route.chat_id,
+                    origin_metadata=origin_metadata,
+                )
+                job_id = job.id
+            except Exception as exc:  # noqa: BLE001 - fail open
+                logger.warning("quota resume scheduling failed: {}", exc)
+
+        quota_gate.write_suspension(
+            ctx.session.metadata,
+            reason=reason,
+            resume_at=resume_at,
+            provider=provider_name,
+            model=model,
+            job_id=job_id,
+        )
+        self.sessions.save(ctx.session)
+        ctx.suppress_response = True
+        ctx.final_content = quota_gate.suspension_notice(snapshot, reason)
 
     async def _persist_turn(self, ctx: TurnContext) -> None:
         session = ctx.require_session()
