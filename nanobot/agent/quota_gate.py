@@ -33,13 +33,14 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypedDict, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from loguru import logger
 
 from nanobot.config_base import Base
+from nanobot.cron.types import CronSchedule
 
 
 class QuotaGateConfig(Base):
@@ -90,6 +91,24 @@ class QuotaLimit:
     @property
     def used_ratio(self) -> float:
         return (self.limit - self.remain) / self.limit if self.limit else 0.0
+
+
+@dataclass
+class _QuotaLimitPayload(TypedDict, total=False):
+    remain: int
+    limit: int
+    next_reset: int
+    label: str
+
+
+class _QuotaSnapshotPayload(TypedDict, total=False):
+    provider: str
+    model: str
+    fetched_at: float
+    status: str
+    note: str
+    requests: _QuotaLimitPayload
+    tokens: _QuotaLimitPayload
 
 
 @dataclass
@@ -200,24 +219,62 @@ class QuotaSnapshot:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "QuotaSnapshot":
-        def _limit(raw: Any, label: str) -> QuotaLimit:
-            raw = raw if isinstance(raw, Mapping) else {}
+        def _limit(raw: object, label: str) -> QuotaLimit:
+            raw_map: dict[str, object] = (
+                dict(cast(Mapping[str, object], raw).items()) if isinstance(raw, Mapping) else {}
+            )
             return QuotaLimit(
-                remain=int(raw.get("remain", 0) or 0),
-                limit=int(raw.get("limit", 0) or 0),
-                next_reset=int(raw.get("next_reset", 0) or 0),
-                label=str(raw.get("label", label) or label),
+                remain=_to_int(raw_map.get("remain", 0), 0),
+                limit=_to_int(raw_map.get("limit", 0), 0),
+                next_reset=_to_int(raw_map.get("next_reset", 0), 0),
+                label=_to_str(raw_map.get("label", label), label),
             )
 
+        payload: _QuotaSnapshotPayload = cast(_QuotaSnapshotPayload, data)
         return cls(
-            provider=str(data.get("provider", "")),
-            model=str(data.get("model", "")),
-            fetched_at=float(data.get("fetched_at", 0.0) or 0.0),
-            requests=_limit(data.get("requests"), "requests"),
-            tokens=_limit(data.get("tokens"), "tokens"),
-            status=str(data.get("status", "active")),
-            note=str(data.get("note", "")),
+            provider=_to_str(payload.get("provider", ""), ""),
+            model=_to_str(payload.get("model", ""), ""),
+            fetched_at=_to_float(payload.get("fetched_at", 0.0), 0.0),
+            requests=_limit(payload.get("requests"), "requests"),
+            tokens=_limit(payload.get("tokens"), "tokens"),
+            status=_to_str(payload.get("status", "active"), "active"),
+            note=_to_str(payload.get("note", ""), ""),
         )
+
+
+def _to_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return default
+    return default
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _to_str(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    string_value = str(value)
+    return string_value if string_value else default
 
 
 # ---------------------------------------------------------------------------
@@ -240,11 +297,11 @@ def quota_fetcher_for(provider_name: str) -> QuotaFetcher | None:
     return _FETCHERS.get((provider_name or "").strip().lower())
 
 
-def _http_get_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
+def _http_get_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
     request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload_obj: object = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise QuotaFetchError(f"quota endpoint HTTP {exc.code}: {exc.reason}") from exc
     except URLError as exc:
@@ -253,9 +310,9 @@ def _http_get_json(url: str, headers: dict[str, str], timeout: float) -> dict[st
         raise QuotaFetchError(f"quota endpoint error: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise QuotaFetchError(f"quota endpoint returned invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
+    if not isinstance(payload_obj, dict):
         raise QuotaFetchError("quota endpoint returned a non-object payload")
-    return payload
+    return cast(dict[str, object], payload_obj)
 
 
 def fetch_yuanyuai_quota(api_key: str, model: str, *, timeout: float = 8.0) -> QuotaSnapshot:
@@ -280,16 +337,14 @@ def fetch_yuanyuai_quota(api_key: str, model: str, *, timeout: float = 8.0) -> Q
     )
     if not payload.get("success", True):
         raise QuotaFetchError(f"quota endpoint returned an error payload: {payload!r}")
-    data = payload.get("data")
-    if not isinstance(data, dict):
+    raw_data = payload.get("data")
+    if not isinstance(raw_data, dict):
         raise QuotaFetchError("quota endpoint missing data object")
+    data = cast(dict[str, object], raw_data)
 
     def _num(key: str, default: float = 0.0) -> float:
         value = data.get(key, default)
-        try:
-            return float(value) if value not in (None, "") else float(default)
-        except (TypeError, ValueError):
-            return float(default)
+        return _to_float(value, default)
 
     return QuotaSnapshot(
         provider="custom_yuanyuai",
@@ -357,7 +412,7 @@ def read_snapshot(metadata: Mapping[str, Any] | None) -> QuotaSnapshot | None:
     if not isinstance(raw, Mapping):
         return None
     try:
-        return QuotaSnapshot.from_dict(raw)
+        return QuotaSnapshot.from_dict(cast(Mapping[str, object], raw))
     except (TypeError, ValueError):
         return None
 
@@ -371,7 +426,10 @@ def read_suspension(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None
     if not isinstance(metadata, Mapping):
         return None
     raw = metadata.get(QUOTA_SUSPENDED_META_KEY)
-    return dict(raw) if isinstance(raw, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return None
+    raw_map: dict[str, object] = dict(cast(Mapping[str, object], raw).items())
+    return {str(key): value for key, value in raw_map.items()}
 
 
 def write_suspension(
@@ -498,15 +556,17 @@ def suspension_notice(
             min_request_buffer=min_request_buffer,
             min_token_buffer=min_token_buffer,
         )
-    if blocking is not None:
+    if snapshot is not None and blocking is not None:
         reset = format_reset(blocking.next_reset)
+        model_name = snapshot.model or "the current model"
         detail = (
-            f"The {blocking.label} budget for {snapshot.model or 'the current model'} is "
-            f"exhausted ({blocking.remain}/{blocking.limit} left)."
+            f"The {blocking.label} budget for {model_name} is exhausted "
+            f"({blocking.remain}/{blocking.limit} left)."
         )
     elif snapshot is not None and snapshot.tokens.next_reset:
         reset = format_reset(snapshot.tokens.next_reset)
-        detail = f"The provider rejected the request for {snapshot.model or 'the current model'}: {reason}."
+        model_name = snapshot.model or "the current model"
+        detail = f"The provider rejected the request for {model_name}: {reason}."
     else:
         reset = "unknown"
         detail = f"The provider rejected the request: {reason}."
@@ -552,6 +612,8 @@ def resume_message(provider: str, model: str, reason: str) -> str:
     )
 
 
-def build_resume_schedule(resume_at: int | None) -> dict[str, Any]:
-    """Return cron-schedule kwargs for a one-shot resume at ``resume_at``."""
-    return {"kind": "at", "at_ms": int(resume_at) * 1000} if resume_at else {"kind": "every", "every_ms": 5 * 60_000}
+def build_resume_schedule(resume_at: int | None) -> CronSchedule:
+    """Return a cron schedule for a one-shot resume at ``resume_at``."""
+    if resume_at:
+        return CronSchedule(kind="at", at_ms=int(resume_at) * 1000)
+    return CronSchedule(kind="every", every_ms=5 * 60_000)

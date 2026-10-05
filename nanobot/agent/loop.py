@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import os
 import time
 import weakref
@@ -351,7 +352,10 @@ class AgentLoop:
         self.tools_config = _tc
         self.web_config = _tc.web
         self.exec_config = _tc.exec
-        self.quota_gate_config = _tc.quota_gate
+        self.quota_gate_config: quota_gate.QuotaGateConfig = cast(
+            quota_gate.QuotaGateConfig,
+            _tc.quota_gate,
+        )
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
         if (
             image_generation_provider_config is not None
@@ -2390,8 +2394,8 @@ class AgentLoop:
         resume_at = snapshot.next_resume_ts(
             min_request_buffer=self.quota_gate_config.min_request_buffer,
             min_token_buffer=self.quota_gate_config.min_token_buffer,
-        ) if snapshot is not None else None
-        if resume_at is None and snapshot is not None:
+        )
+        if resume_at is None:
             # Fall back to the provider error's own reset if the snapshot has none.
             resume_at = snapshot.requests.next_reset or snapshot.tokens.next_reset or None
 
